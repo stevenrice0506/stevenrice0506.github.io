@@ -1,0 +1,294 @@
+---
+title: " PredictIt and 538 Accuracy Comparison Analysis"
+output: html_notebook
+---
+## Introduction
+
+The Presidential Election of 2016 was notable for being unpredictable. Nevertheless, there were many organizations that endevored to make accurate predictions. Of particular interest to many people is a political prediction market called PredictIt. PredictIt is essentially a stockmarket that has shares taht pay off when a prediction is accurate. For more background on PredictIt, you can see my Python project [here](http://stevenrice0506.github.io/PredictIt_Strategies.html). 
+For this project, we'll see how accurate PredictIt was, and how it compared to another reputable Prediction organization.
+
+```{r message=FALSE}
+library(ggplot2)
+library(ggthemes)
+library(tidyverse)
+```
+
+The first thing, as always, is to get our data. Since the data was gathered from the PredictIt site, and then merged into a single file with python, we just need to import it.
+```{r}
+result.df <- read.csv('predictit\\Market_Histories\\Merged.csv')
+result.df$Date <- as.Date(result.df$Date, format="%m-%d-%Y")
+result.df$State <- as.character(result.df$State)
+result.df$LastTrade <- as.numeric(result.df$LastTrade)
+result.df$LastTrade <- result.df$LastTrade / 100
+result.df[result.df$Contract == 'Libertarian',]$Contract <- 'Other'
+result.df <- result.df[!is.na(result.df$Date),]
+```
+
+Let's change the abbreviations to the actual names. This is pretty easy with the built-in, `state.name` and `state.abb`. In addition to each state, the "United States" and the "District of Columbia" are stored in the `State` column.
+```{r}
+state_name.v <- c(state.name,'United States','District of Columbia')
+state_abb.v <- c(state.abb,'PR','DC')
+result.df$State <- state_name.v[match(result.df$State,state_abb.v)]
+
+result.df$Contract <- factor(result.df$Contract, 
+                             levels = c('Democratic','Republican','Other'))
+
+```
+
+We now want to show all of the states' predictions over time. The long way to do that would be to plot each state's time series data individually with the code below.
+
+```{r}
+ for(state in unique(result.df$State))    {
+   state.df <- result.df[result.df$State == state,]
+   state.df <- state.df[3:nrow(state.df),]  
+   print(ggplot(state.df, aes(Date, LastTrade,color=Contract)) +  geom_line(size=2) +
+           ggtitle(state) + xlab("") +  ylab("Win Probability") +
+           scale_color_fivethirtyeight("State") + theme_fivethirtyeight())
+   
+   #eliminate white space for file
+   state_label <- gsub(" ", "_", state)  
+   #saves plot to file
+   ggsave(paste('predictit\\Results\\Graphs\\', state_label, '.jpg',sep=""))   }
+```
+
+However, we don't want to plot all of those, because they would take up too much space on the page, but we saved them to the file in case we want to take a closer look at any of the state predictions. Here are a couple examples.
+_________________________________________________________________________________________________________
+
+![](predictit\\Results\\Graphs\\Michigan.jpg)
+_________________________________________________________________________________________________________
+
+![](predictit\\Results\\Graphs\\United_States.jpg)
+__________________________________________________________________________________________________
+
+But since these don't give us the whole picture, we can use a faceted plot, which takes up much less space on the page, and will place each state on the same time scale.
+
+```{r}
+print(ggplot( result.df, aes(x = as.Date(Date,origin = "2016-07-22"),
+      y = LastTrade, color=Contract)) +  geom_line(size=1) + 
+      facet_wrap(~State, ncol = 7, nrow=9) +
+      xlab("") + ylab("") + ylim(0,1) +
+      scale_color_fivethirtyeight("State") + theme_fivethirtyeight() + 
+      theme(axis.text.x = element_blank(), axis.text.y = element_blank()))
+
+ggsave('predictit\\Results\\Graphs\\faceted_state_predictions.jpg',
+      width = 10, height = 8 )
+```
+
+![](predictit\\Results\\Graphs\\faceted_state_predictions.jpg)
+
+From that plot, note a couple things:
+
+* Not all of the data start at the same date. This is due to PredictIt not opening up some state markets until seemingly arbitrary dates. Since they weren't open, the data simply doesn't exist for those dates. In the case of Kansas, there is only about a month of data before the election. As you'll see, this will cause problems for us later down the line.
+
+* New Mexico and the United States have a small "Other" line, but Utah and Alaska do not. You may remember Evan McMullin making waves in a few states near the end of the election. For some states, PredictIt chose to not make a separate market for him, and directed users to by "No" contracts for both Republican and Democrats, which explains the sharp decrease in the Utah and Alaska graphs during October. But oddly, they made the opposite decision for the United States and New Mexico markets, which had an "other" category. 
+
+Since the "Other" portion of each graph is negligible, the error for Republicans will be about the same as the error for Democrats.
+
+## Accuracy
+
+In order to determine accuracy, we'll need to get the presidential election results for each state/region.
+```{r}
+state.result.df <- read.csv('fivethirtyeight\\Data\\Results\\Results.csv')
+state.result.df$Candidate <- ifelse(state.result.df$Candidate == 'Trump','Republican',
+                              ifelse(state.result.df$Candidate =='Clinton', 'Democratic',
+                                       'Other'))
+
+colnames(state.result.df)[1] <- 'Contract'
+```
+
+We'll focus on only one party so that we don't double-count the errors. Since Republicans won the election, let's focus on them.
+
+```{r}
+#predictit (pi) dataframe
+pi.df <- result.df[result.df$Contract == "Republican",]
+
+pi_wide.df <- spread(pi.df,Date,LastTrade)
+
+pi_wide.df <- merge(x = pi_wide.df, y = state.result.df, 
+                   by = c("State",'Contract'), all.x = TRUE)
+```
+
+Here, we subtract the binary result (1 if Republicans won the state, 0 otherwise) with all of the probabilities. 
+
+When determining our errors, we'll use the absolute value of the errors rather than squared errors for the sake of both a clearer interpretation. This way, an average error of .2 means that predictions were off by an average of 20% per state.
+
+```{r}
+pi_error.df <- abs(pi_wide.df$Won - pi_wide.df[,3:(length(pi_wide.df)-1)])
+```
+
+And now we have to make our first decision. Remember how Kansas only had about a month of data? Since operations on missing data produces missing data, our average error is restricted to days in which all states have data. The result is the following plot.
+
+
+```{r}
+pi_long.df <- data.frame(t(pi_error.df)) # convert from wide to long
+colnames(pi_long.df) <- pi_wide.df$State
+pi_long.df$error_avg <- rowMeans(pi_long.df)
+
+plot_error <- function()
+  {
+    ggplot(pi_long.df, aes(as.Date(rownames(pi_long.df)), error_avg, group=1)) +
+        geom_line(size=2,color='red') + scale_x_date() + 
+        ggtitle("PredictIt: Average Error By Date") + 
+        scale_color_fivethirtyeight("error_avg") + theme_fivethirtyeight()
+  }
+
+plot_error()
+```
+
+If we want to analyse more than that last month, we have to do one of a few things, all of which have their benefits and drawbacks.
+
+* Remove states with missing data from our data set: This will almost certainly bias our result, since states like Kansas with missing data were probably some of the easier states to predict. Still, removing only one state likely wouldn't change our results by too much.
+
+* Try to determine what path the predictions would have taken if the missing markets had been open on PredictIt. This would involve making judgement calls on how the data would have changed, which ideally we wouldn't have to do.
+
+* Ignore the errors: This is the simplest to do. However, this would bias our results compared to the hypothetical situation where PredictIt opened up all of their markets at the same time.
+
+Let's try each of these to see how the results come out.
+
+```{r}
+pi_long.df <- data.frame(t(pi_error.df)) #convert from wide to long
+colnames(pi_long.df) <- pi_wide.df$State 
+pi_long.df$Kansas <- NULL
+pi_long.df$error_avg <- rowMeans(pi_long.df)
+
+plot_error()
+```
+Removing Kansas gives a little more than a month of extra data. We could also remove other states, but no other ones really stand out concerning their data-availability. So, if we tried to remove all of the states that have missing data, the result would be so biased that it would be next to useless for the analysis. So instead of doing that, we'll move on to the next option. But first, let's look at our Kansas plot and see if anything jumps out at us.
+
+
+![](predictit\\Results\\Graphs\\Kansas.jpg)
+
+If we were mindlessly fitting a function to the Republican (or Democratic) data, we'd likely try to use linear regression. But it doesn't make much sense to conclude that people would have been predicting approximately a 50% chance for Trump winning Kansas in July.
+
+Instead, let's look at our faceted plot to see what similar markets were doing before the Kansas market opened.
+
+![](predictit\\Results\\Graphs\\faceted_state_predictions.jpg)
+
+Look at Texas, Idaho, South Dakota, North Dakota, and other similarly solid Red-States. For the data available, they look like the Kansas data. Luckily, for those states, the data prior to Oct 11th (the first day of the Kansas data) could be closely approximated by a constant value plus some noise. 
+
+Normally, it's bad statistical practice to fill in missing data with the mean. However, here we would have expected the data to have been close to the mean value if the Kansas market was open from the start. So, we'll find the mean of the data that is available for Kansas, and use that value as the value for all previous periods.
+
+```{r}
+pi_long.df <- data.frame(t(pi_error.df))
+colnames(pi_long.df) <- pi_wide.df$State
+
+pi_long.df$Kansas[is.na(pi_long.df$Kansas)] <- mean(pi_long.df$Kansas, na.rm = TRUE)
+pi_long.df$error_avg <- rowMeans(pi_long.df)
+
+plot_error()
+```
+
+Note that this looks pretty similar to when we simply removed Kansas above. That isn't very surprising. Kansas is only one of the fifty-two areas we're observing.
+
+But we don't have to stop there. Luckily, only non-swing states have missing data. It's reasonable to assume that those data follow the same pattern as Kansas. The exception is Alaska, which had a third party influence on the predictions in early October.
+
+So after making a special case for Alaska, we can use the same method as we did for Kansas above, and then we can calculate the average error.
+
+```{r}
+#convert dataframe from wide to long
+pi_long.df <- data.frame(t(pi_error.df))
+colnames(pi_long.df) <- pi_wide.df$State
+
+#replace Alaska's nan values with mean of values from before the spike in October
+pi_long.df$Alaska[is.na(pi_long.df$Alaska)] <- mean(pi_long.df[1:76,]$Alaska, na.rm=TRUE)
+
+#replace nan values with state means
+pi_long.df[] <- lapply(pi_long.df, function(x) { 
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  x})
+
+pi_long.df$error_avg <- rowMeans(pi_long.df)
+#creating a vector for later
+pi_mean.v <- pi_long.df$error_avg
+
+plot_error()
+```
+That gives us the average error for each date. Ideally, error would steadily decrease as we moved toward the election date. But in this past election, uncertainty was high throughout the time period. As a result, the errors are more volatile than might have been expected.
+
+We must also make sure that we never lose sight of the interpretation of our data. On the final day of the election, the average PredictIt market was still off by roughly 17 percentage points. 
+
+Now, we can move on to our final way of dealing with our missing data, to ignore them when computing average error with a simple `na.rm = TRUE` argument.
+
+```{r}
+#resets the dataframe
+pi_long.df <- data.frame(t(pi_error.df)) 
+colnames(pi_long.df) <- pi_wide.df$State
+
+pi_long.df$error_avg <- rowMeans(pi_long.df, na.rm = TRUE)
+#creating a vector for later
+pi_ignore.v <- pi_long.df$error_avg
+plot_error()
+```
+
+
+And let's plot this line on the same axis as our last one so that we can compare them.
+```{r}
+diff_error.df <- data.frame(pi_mean.v,pi_ignore.v,row.names = row.names(pi_long.df))
+
+#ggplot(pi_long.df, aes(as.Date(rownames(pi_long.df)), error_avg, group=1)) +
+         #geom_line(size=2,color='red') + scale_x_date() + 
+         #scale_color_fivethirtyeight("error_avg") + theme_fivethirtyeight()
+
+ggplot(diff_error.df, aes(as.Date(rownames(pi_long.df)))) +
+  geom_line(size=2, aes(y = pi_ignore.v, colour = "Ignored Errors")) +
+  geom_line(size=2, aes(y = pi_mean.v, colour = "Mean of Data")) +
+  ggtitle("Average Error based on NAN handling") +
+  theme_fivethirtyeight()
+```
+
+Again, there are a couple things to note:
+
+* The average error is very close starting in the beginning of September, where the only missing data belonged to Kansas. Before then, the average errors diverge wildly.
+
+* Since the states without data were the ones that were easier to predict (non-swing states),it's no surprise that ignoring the errors gives a higher average error.
+
+
+Now that we have a visual representation of PredictIt's predictions, the next step is to figure out how well PredictIt performed compared to other people trying to predict the election.
+
+The New York Times gave Clinton a 98% chance to win on election night. Sam Wang, a neuroscientist at Princeton who took part in some statistical modeling, gave Clinton a projected 323 Electoral votes on the night of the election, which is off by a shocking 91 points. 
+
+Compared to them, PredictIt did far better. But the answer is not as clear when you are comparing PredictIt to Nate Silver, at [fivethirtyeight.com](https://projects.fivethirtyeight.com/2016-election-forecast/).
+
+### Five Thirty Eight
+
+After cleaning up our environment, we're ready to go.
+```{r}
+rm(list=setdiff(ls(), c("diff_error.df","pi_wide.df")))
+```
+
+The following steps are basically the same as above, but for the fivethirtyeight's collected data. The data is imported, reshaped, and errors are determined. This time, luckily, there is no missing data, which makes the analysis much more objective.
+```{r}
+result.df <- read.csv('fivethirtyeight\\Data\\Results\\Election_Results.csv')
+result.df$Date <- as.Date(result.df$Date, format="%Y-%m-%d")
+result.df$X <- NULL
+
+fte.df <- spread(result.df[result.df$Candidate == "Trump",],Date,Win_probability)
+fte_error.df <- abs(fte.df[,3] - fte.df[,5:length(fte.df)])
+fte_long.df <- data.frame(t(fte_error.df)) 
+
+fte_long.df$error_avg <- rowMeans(fte_long.df)
+fte_error_avg.df<- fte_long.df[,'error_avg',drop=FALSE]
+```
+
+
+```{r}
+fte_pi.df <- merge(fte_error_avg.df,diff_error.df, by= 0, drop=FALSE)
+names(fte_pi.df)[names(fte_pi.df) == 'Row.names'] <- 'date'
+
+ggplot(fte_pi.df, aes(as.Date(as.character(fte_pi.df$date)))) +
+  geom_line(size=2, aes(y = fte_pi.df$pi_ignore.v, colour = "PredictIt: Ignored Errors")) +
+  geom_line(size=2, aes(y = fte_pi.df$pi_mean.v, colour = "PredictIt: Mean of Data")) +
+  geom_line(size=2, aes(y = fte_pi.df$error_avg, colour = "538")) +
+  ggtitle("Average Error: PredictIt versus 538") + theme_fivethirtyeight()
+
+ggsave('fivethirtyeight\\Data\\Results\\Graphs\\Average_Error_PI_538.jpg')
+
+```
+
+## Conclusion:
+
+The results are not as clear as we would have hoped. Earlier in the election cycle, 538 had an edge over the PredictIt data that ignored errors, but did worse than the PredictIt data that replaced missing values with their means. So which data should we use? That depends on your main concern.
+
+If you're wondering about well-run prediction markets, which would have had all markets open simultaneously, then you should be comparing the blue line to the 538 error line. On the other hand, if you're interested how Predictit itself performed, then you should focus more on the green line.
+
+In either case, later in  the election cycle, 538 clearly outperformed PredictIt on average. It was only by a couple of percentage points, but sometimes a couple of percentage points is all that matters. In the future, interested people should pay attention to both 538 and PredictIt when trying to predict the next election.
